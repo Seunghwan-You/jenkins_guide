@@ -1,0 +1,72 @@
+pipeline {
+    agent any
+
+    environment {
+        DOCKER_REGISTRY = "neocloudacr001.azurecr.io"
+        IMAGE_NAME = "demo-app"
+        AZURE_CREDENTIALS_ID = "acr-credentials"
+        BUILD_NUMBER = "${env.BUILD_NUMBER}"
+        AZURE_TENANT_ID = "97f42f55-f1db-4804-b1eb-08db083efd4f"        
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {                               
+                // 매니페스트 저장소 체크아웃
+                dir('manifest') {
+                    git url: 'https://yooshwan-admin@bitbucket.org/yooshwan/manifest.git',
+                        branch: 'main',
+                        credentialsId: '0d16c58c-0a09-4599-8a7a-80ad85925a33'
+                }
+            }
+        }      
+        stage('Build') {
+            steps {
+                sh 'mvn clean package'
+            }
+        }
+        stage('Build Docker Image') {
+            steps {
+                script {
+                    sh "docker build -t ${DOCKER_REGISTRY}/${IMAGE_NAME}:${BUILD_NUMBER} ."
+                }
+            }
+        }
+        stage('Push Docker Image') {
+            steps {
+                script {
+                    withCredentials([usernamePassword(credentialsId: AZURE_CREDENTIALS_ID, passwordVariable: 'AZURE_PASSWORD', usernameVariable: 'AZURE_USER')]) {
+                        sh 'az login --service-principal -u ${AZURE_USER} -p ${AZURE_PASSWORD} --tenant ${AZURE_TENANT_ID}'
+                        sh "az acr login --name ${DOCKER_REGISTRY}"
+                        sh "docker push ${DOCKER_REGISTRY}/${IMAGE_NAME}:${BUILD_NUMBER}"
+                    }
+                }
+            }
+        }
+
+        stage('Update Manifest') {
+            steps {
+                dir('manifest') {
+                    // deployment.yaml 업데이트
+                    sh "sed -i 's|image: .*|image: ${DOCKER_REGISTRY}/${IMAGE_NAME}:${BUILD_NUMBER}|' deployment.yaml"
+                    
+                    // 변경사항 커밋 및 푸시
+                    withCredentials([usernamePassword(credentialsId: '0d16c58c-0a09-4599-8a7a-80ad85925a33', usernameVariable: 'GIT_USERNAME', passwordVariable: 'GIT_PASSWORD')]) {
+                        sh '''
+                        git config user.email "jenkins@neocloud.com"
+                        git config user.name "Jenkins"
+                        git add deployment.yaml
+                        git commit -m "Update image to ${BUILD_NUMBER}"
+                        git push https://yooshwan-admin:${GIT_PASSWORD}@bitbucket.org/yooshwan/manifest.git HEAD:main
+                        '''
+                        // 배포 실행
+                        sh "kubectl apply -f deployment.yaml"
+                        sh "kubectl apply -f service.yaml"
+                        // 배포 상태 확인
+                        sh "kubectl rollout status deployment/${IMAGE_NAME}"
+                    }
+                }
+            }
+        }
+    }
+}
